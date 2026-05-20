@@ -393,107 +393,86 @@
   <!-- Supabase SDK -->
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
   <script>
-  (function(){
-    // ── Supabase configuration ────────────────────────────────────────────────
-    // Replace these with your actual Supabase project URL and anon key.
+  // Supabase adapter — runs after DOM is ready so window._fb and window._boot are defined
+  window.addEventListener('DOMContentLoaded', function(){
     const SUPABASE_URL = 'https://fnksdkuzuxpcwtmfddic.supabase.co';
     const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImZua3Nka3V6dXhwY3d0bWZkZGljIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzkyMTQ3NjgsImV4cCI6MjA5NDc5MDc2OH0.nVQOSMC_Lf5LbcSR99TuHM3PSr--ap8xtP6Fxe7lwDM';
-    // Table name in your Supabase database (create it with the SQL below).
-    // Schema:  CREATE TABLE netiva_store (doc_id text PRIMARY KEY, data jsonb);
-    //          ALTER TABLE netiva_store ENABLE ROW LEVEL SECURITY;
-    //          CREATE POLICY "public read"  ON netiva_store FOR SELECT USING (true);
-    //          CREATE POLICY "public write" ON netiva_store FOR ALL   USING (true);
     const TABLE = 'netiva_store';
     const MAIN_DOC = 'shopdata';
 
     const sb = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
-    // ── Firestore-compatible adapter ─────────────────────────────────────────
-    // The rest of the app uses window._fb.{getDoc,setDoc,onSnapshot,doc,fsdb,storeDoc}.
-    // We implement the same interface on top of Supabase so no logic changes needed.
-
-    // doc() returns a plain object {_table, _id} — acts as a Firestore DocumentReference
+    // doc() — mirrors Firestore's doc(db, collection, id)
     function sbDoc(fsdb_unused, collection_unused, docId){ return {_table:TABLE, _id:docId}; }
 
-    // getDoc(ref) → resolves to a Firestore-like DocumentSnapshot
+    // getDoc(ref) — returns a Firestore-like snapshot
     async function sbGetDoc(ref){
-      const {data, error} = await sb.from(TABLE).select('data').eq('doc_id', ref._id).maybeSingle();
-      if(error) throw error;
-      return {
-        exists: ()=> !!data,
-        data:   ()=> data ? data.data : null
-      };
+      try{
+        const {data, error} = await sb.from(TABLE).select('data').eq('doc_id', ref._id).maybeSingle();
+        if(error){ console.error('Supabase getDoc error ('+ref._id+'):', error); throw error; }
+        return { exists: ()=> !!data, data: ()=> data ? data.data : null };
+      }catch(e){ console.error('Supabase getDoc threw ('+ref._id+'):', e); throw e; }
     }
 
-    // setDoc(ref, payload, {merge}) → upserts the row; merge=true does a deep merge
+    // setDoc(ref, payload, {merge}) — upserts the row
     async function sbSetDoc(ref, payload, opts){
-      if(opts && opts.merge){
-        // Fetch existing, merge, then upsert
-        const {data: existing} = await sb.from(TABLE).select('data').eq('doc_id', ref._id).maybeSingle();
-        const merged = existing ? deepMerge(existing.data, payload) : payload;
-        const {error} = await sb.from(TABLE).upsert({doc_id: ref._id, data: merged}, {onConflict:'doc_id'});
-        if(error) throw error;
-      } else {
-        const {error} = await sb.from(TABLE).upsert({doc_id: ref._id, data: payload}, {onConflict:'doc_id'});
-        if(error) throw error;
-      }
+      try{
+        let toWrite = payload;
+        if(opts && opts.merge){
+          const {data: existing} = await sb.from(TABLE).select('data').eq('doc_id', ref._id).maybeSingle();
+          toWrite = existing ? deepMerge(existing.data, payload) : payload;
+        }
+        const {error} = await sb.from(TABLE).upsert({doc_id: ref._id, data: toWrite}, {onConflict:'doc_id'});
+        if(error){ console.error('Supabase setDoc error ('+ref._id+'):', error); throw error; }
+        console.log('Supabase saved:', ref._id);
+      }catch(e){ console.error('Supabase setDoc threw ('+ref._id+'):', e); throw e; }
     }
 
-    // onSnapshot(ref, callback) → polls every 4 s (Supabase Realtime requires extra setup)
-    // For true real-time, enable the Realtime publication on your table in the Supabase dashboard.
+    // onSnapshot(ref, callback) — Realtime with polling fallback
     const _snapChannels = {};
     function sbOnSnapshot(ref, callback){
-      // Try Supabase Realtime first
-      const channelKey = ref._id;
-      if(_snapChannels[channelKey]) return; // already listening
-      const channel = sb.channel('db-'+channelKey)
-        .on('postgres_changes', {
-          event: '*', schema: 'public', table: TABLE,
-          filter: 'doc_id=eq.'+ref._id
-        }, async ()=>{
-          const snap = await sbGetDoc(ref);
-          callback(snap);
-        })
+      const key = ref._id;
+      if(_snapChannels[key]) return;
+      const channel = sb.channel('db-'+key)
+        .on('postgres_changes',{event:'*',schema:'public',table:TABLE,filter:'doc_id=eq.'+key},
+          async ()=>{ const snap=await sbGetDoc(ref); callback(snap); })
         .subscribe((status)=>{
-          // Fallback: if Realtime is not enabled, fall back to polling
-          if(status === 'CHANNEL_ERROR' || status === 'TIMED_OUT'){
-            if(!_snapChannels[channelKey+'_poll']){
-              _snapChannels[channelKey+'_poll'] = setInterval(async ()=>{
-                const snap = await sbGetDoc(ref);
-                callback(snap);
-              }, 4000);
+          if(status==='CHANNEL_ERROR'||status==='TIMED_OUT'){
+            if(!_snapChannels[key+'_poll']){
+              _snapChannels[key+'_poll']=setInterval(async()=>{
+                const snap=await sbGetDoc(ref); callback(snap);
+              },4000);
             }
           }
         });
-      _snapChannels[channelKey] = channel;
-      // Fire immediately with current value (mirrors Firestore behaviour)
+      _snapChannels[key]=channel;
+      // Fire immediately with current value (mirrors Firestore)
       sbGetDoc(ref).then(snap=>{ if(snap.exists()) callback(snap); }).catch(()=>{});
     }
 
     function deepMerge(target, source){
-      if(!target || typeof target !== 'object') return source;
-      const out = {...target};
+      if(!target||typeof target!=='object') return source;
+      const out={...target};
       for(const k of Object.keys(source)){
-        if(source[k] && typeof source[k]==='object' && !Array.isArray(source[k])){
-          out[k] = deepMerge(target[k], source[k]);
-        } else {
-          out[k] = source[k];
-        }
+        if(source[k]&&typeof source[k]==='object'&&!Array.isArray(source[k])){
+          out[k]=deepMerge(target[k],source[k]);
+        } else { out[k]=source[k]; }
       }
       return out;
     }
 
-    // Populate window._fb (same shape the app already expects)
+    // Wire up window._fb and boot
     const storeDocRef = sbDoc(null, null, MAIN_DOC);
-    window._fb.fsdb    = sb;           // passed as first arg to doc() calls
-    window._fb.storeDoc= storeDocRef;
-    window._fb.setDoc  = sbSetDoc;
-    window._fb.getDoc  = sbGetDoc;
+    window._fb.fsdb       = sb;
+    window._fb.storeDoc   = storeDocRef;
+    window._fb.setDoc     = sbSetDoc;
+    window._fb.getDoc     = sbGetDoc;
     window._fb.onSnapshot = sbOnSnapshot;
-    window._fb.doc     = sbDoc;
+    window._fb.doc        = sbDoc;
 
+    console.log('Supabase adapter ready — booting...');
     window._boot();
-  })();
+  });
   </script>
 </head>
 <body>
