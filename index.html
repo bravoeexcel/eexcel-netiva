@@ -390,111 +390,110 @@
       .fpill { padding: 7px 14px; font-size: 13px; }
     }
   </style>
-  <!-- Back4App / Parse SDK -->
-  <script src="https://unpkg.com/parse/dist/parse.min.js"></script>
+  <!-- Supabase SDK -->
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
   <script>
-    (async function() {
-      // ── Back4App config — replace with your App ID and JS Key ────────────
-      const B4A_APP_ID   = 'KOPThsDS74oYGiRoxjDReyvmm9IMWHtyzCbpmQX0';
-      const B4A_JS_KEY   = 'VnqJfZt2hIfINcLvYxgN9Hn58fizT5bS751DErci';
-      const COLL_MAIN    = 'Netiva';            // Parse class name (capitalised by convention)
-      const DOC_MAIN     = 'shopdata';          // document / row identifier
+  (function(){
+    // ── Supabase configuration ────────────────────────────────────────────────
+    // Replace these with your actual Supabase project URL and anon key.
+    const SUPABASE_URL = 'https://fnksdkuzuxpcwtmfddic.supabase.co';
+    const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImZua3Nka3V6dXhwY3d0bWZkZGljIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzkyMTQ3NjgsImV4cCI6MjA5NDc5MDc2OH0.nVQOSMC_Lf5LbcSR99TuHM3PSr--ap8xtP6Fxe7lwDM';
+    // Table name in your Supabase database (create it with the SQL below).
+    // Schema:  CREATE TABLE netiva_store (doc_id text PRIMARY KEY, data jsonb);
+    //          ALTER TABLE netiva_store ENABLE ROW LEVEL SECURITY;
+    //          CREATE POLICY "public read"  ON netiva_store FOR SELECT USING (true);
+    //          CREATE POLICY "public write" ON netiva_store FOR ALL   USING (true);
+    const TABLE = 'netiva_store';
+    const MAIN_DOC = 'shopdata';
 
-      // Init Parse SDK
-      Parse.initialize(B4A_APP_ID, B4A_JS_KEY);
-      Parse.serverURL = 'https://parseapi.back4app.com/';
+    const sb = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
-      // Anonymous session so unauthenticated reads/writes work
-      // (make sure your Parse class has public read+write enabled in Back4App dashboard)
-      try {
-        if (!Parse.User.current()) await Parse.User.enableUnsafeCurrentUser();
-      } catch(e) { console.warn('Back4App session error:', e); }
+    // ── Firestore-compatible adapter ─────────────────────────────────────────
+    // The rest of the app uses window._fb.{getDoc,setDoc,onSnapshot,doc,fsdb,storeDoc}.
+    // We implement the same interface on top of Supabase so no logic changes needed.
 
-      // ── Adapter shim — keeps the rest of the app unchanged ───────────────
-      //
-      // _fb.getDoc(ref)         → resolves { exists(), data() }
-      // _fb.setDoc(ref, data)   → resolves when write complete
-      // _fb.onSnapshot(ref, cb) → starts real-time listener; cb receives snap
-      // _fb.doc(db, coll, id)   → returns a Parse doc reference object
-      // _fb.storeDoc            → the main shopdata doc reference
+    // doc() returns a plain object {_table, _id} — acts as a Firestore DocumentReference
+    function sbDoc(fsdb_unused, collection_unused, docId){ return {_table:TABLE, _id:docId}; }
 
-      // Lightweight ref object: { _coll, _id }
-      function b4aRef(coll, id) {
-        return { _coll: coll, _id: id };
-      }
-
-      // Snapshot wrapper consistent with the rest of the app
-      function b4aSnap(data) {
-        return {
-          exists: () => data !== null && data !== undefined,
-          data:   () => data,
-        };
-      }
-
-      // Find the Parse object whose "docId" field matches ref._id, or null
-      async function findParseObj(ref) {
-        const query = new Parse.Query(ref._coll);
-        query.equalTo('docId', ref._id);
-        return await query.first() || null;
-      }
-
-      window._fb.fsdb     = Parse;
-      window._fb.storeDoc = b4aRef(COLL_MAIN, DOC_MAIN);
-
-      window._fb.doc = function(_db, coll, id) {
-        return b4aRef(coll, id);
+    // getDoc(ref) → resolves to a Firestore-like DocumentSnapshot
+    async function sbGetDoc(ref){
+      const {data, error} = await sb.from(TABLE).select('data').eq('doc_id', ref._id).maybeSingle();
+      if(error) throw error;
+      return {
+        exists: ()=> !!data,
+        data:   ()=> data ? data.data : null
       };
+    }
 
-      window._fb.getDoc = async function(ref) {
-        try {
-          const obj = await findParseObj(ref);
-          if (!obj) return b4aSnap(null);
-          // Return a plain JS object (strip Parse internals)
-          const raw = obj.toJSON();
-          delete raw.objectId; delete raw.createdAt; delete raw.updatedAt; delete raw.docId;
-          return b4aSnap(raw);
-        } catch(e) {
-          console.warn('Back4App getDoc error:', e);
-          return b4aSnap(null);
-        }
-      };
+    // setDoc(ref, payload, {merge}) → upserts the row; merge=true does a deep merge
+    async function sbSetDoc(ref, payload, opts){
+      if(opts && opts.merge){
+        // Fetch existing, merge, then upsert
+        const {data: existing} = await sb.from(TABLE).select('data').eq('doc_id', ref._id).maybeSingle();
+        const merged = existing ? deepMerge(existing.data, payload) : payload;
+        const {error} = await sb.from(TABLE).upsert({doc_id: ref._id, data: merged}, {onConflict:'doc_id'});
+        if(error) throw error;
+      } else {
+        const {error} = await sb.from(TABLE).upsert({doc_id: ref._id, data: payload}, {onConflict:'doc_id'});
+        if(error) throw error;
+      }
+    }
 
-      window._fb.setDoc = async function(ref, data, _opts) {
-        try {
-          let obj = await findParseObj(ref);
-          if (!obj) {
-            const Cls = Parse.Object.extend(ref._coll);
-            obj = new Cls();
-            obj.set('docId', ref._id);
+    // onSnapshot(ref, callback) → polls every 4 s (Supabase Realtime requires extra setup)
+    // For true real-time, enable the Realtime publication on your table in the Supabase dashboard.
+    const _snapChannels = {};
+    function sbOnSnapshot(ref, callback){
+      // Try Supabase Realtime first
+      const channelKey = ref._id;
+      if(_snapChannels[channelKey]) return; // already listening
+      const channel = sb.channel('db-'+channelKey)
+        .on('postgres_changes', {
+          event: '*', schema: 'public', table: TABLE,
+          filter: 'doc_id=eq.'+ref._id
+        }, async ()=>{
+          const snap = await sbGetDoc(ref);
+          callback(snap);
+        })
+        .subscribe((status)=>{
+          // Fallback: if Realtime is not enabled, fall back to polling
+          if(status === 'CHANNEL_ERROR' || status === 'TIMED_OUT'){
+            if(!_snapChannels[channelKey+'_poll']){
+              _snapChannels[channelKey+'_poll'] = setInterval(async ()=>{
+                const snap = await sbGetDoc(ref);
+                callback(snap);
+              }, 4000);
+            }
           }
-          // Merge each top-level key
-          Object.keys(data).forEach(k => obj.set(k, data[k]));
-          await obj.save();
-        } catch(e) { console.warn('Back4App setDoc error:', e); }
-      };
+        });
+      _snapChannels[channelKey] = channel;
+      // Fire immediately with current value (mirrors Firestore behaviour)
+      sbGetDoc(ref).then(snap=>{ if(snap.exists()) callback(snap); }).catch(()=>{});
+    }
 
-      // Real-time listener via Parse Live Query
-      // Requires Live Query to be enabled on your Back4App app (it is by default)
-      window._fb.onSnapshot = function(ref, cb) {
-        try {
-          const query = new Parse.Query(ref._coll);
-          query.equalTo('docId', ref._id);
-          query.subscribe().then(sub => {
-            const emit = async () => {
-              const snap = await window._fb.getDoc(ref);
-              cb(snap);
-            };
-            // Fire immediately with current value
-            emit();
-            sub.on('update', emit);
-            sub.on('create', emit);
-          });
-        } catch(e) { console.warn('Back4App onSnapshot error:', e); }
-      };
+    function deepMerge(target, source){
+      if(!target || typeof target !== 'object') return source;
+      const out = {...target};
+      for(const k of Object.keys(source)){
+        if(source[k] && typeof source[k]==='object' && !Array.isArray(source[k])){
+          out[k] = deepMerge(target[k], source[k]);
+        } else {
+          out[k] = source[k];
+        }
+      }
+      return out;
+    }
 
-      // Boot the app — _fb is fully populated now
-      window._boot();
-    })();
+    // Populate window._fb (same shape the app already expects)
+    const storeDocRef = sbDoc(null, null, MAIN_DOC);
+    window._fb.fsdb    = sb;           // passed as first arg to doc() calls
+    window._fb.storeDoc= storeDocRef;
+    window._fb.setDoc  = sbSetDoc;
+    window._fb.getDoc  = sbGetDoc;
+    window._fb.onSnapshot = sbOnSnapshot;
+    window._fb.doc     = sbDoc;
+
+    window._boot();
+  })();
   </script>
 </head>
 <body>
@@ -855,30 +854,29 @@ const DB_DEFAULTS = {
 
 let db = {...DB_DEFAULTS, products:[...DEFAULT_PRODS]};
 
-// ── Per-session state (never synced to Back4App) ─────────────────────────
+// ── Per-session state (never synced to Supabase) ──────────────────────────
 // db.cur (logged-in user), db.adm (admin flag) stay local per session only.
 // Everything else (products, referrers, users, adminEmail/Password, heroImage,
-// heroTextTitle, heroTextSub, feeRate) is synced globally via Back4App.
+// heroTextTitle, heroTextSub, feeRate) is synced globally via Supabase.
 
 const SYNC_KEYS = ['products','referrers','users','adminEmail','adminPassword',
   'adminCreated','heroTextTitle','heroTextSub','feeRate'];
-// Image-only keys stored in a separate Back4App document to keep the main
+// Image-only keys stored in a separate Supabase row to keep the main
 // doc small and fast. heroImage + per-product imgs arrays live here.
 const IMG_DOC_KEY = 'netiva_images';
 
 let _svPending = false;
 let _fbReady = false;
-// Back4App API references — populated once the SDK script has loaded,
-// so it runs after this script and can safely write to window._fb)
+// Supabase adapter references — populated by the inline script above
 window._fb = { fsdb:null, storeDoc:null, setDoc:null, getDoc:null, onSnapshot:null, doc:null };
 const _fb = window._fb;
 
-// ── Image storage: one Back4App doc per product, one for hero, one per referrer ──
-// netiva/hero          → { heroImage: '...' }
-// netiva/img_p1        → { imgs: [...base64...] }
-// netiva/img_p2        → { imgs: [...base64...] }
-// netiva/ref_r1        → { alipayQr: '...', wechatQr: '...' }
-// This gives each item its own 1MB budget — no more size limits.
+// ── Image storage: one Supabase row per product, one for hero, one per referrer ──
+// netiva_store row 'hero'      → data: { heroImage: '...' }
+// netiva_store row 'img_p1'    → data: { imgs: [...base64...] }
+// netiva_store row 'img_p2'    → data: { imgs: [...base64...] }
+// netiva_store row 'ref_r1'    → data: { alipayQr: '...', wechatQr: '...' }
+// This gives each item its own budget — no more size limits.
 
 function _buildMainPayload(){
   // Strip imgs/img from products and QRs from referrers — keep only metadata
@@ -959,8 +957,8 @@ function _buildLocalImgCache(){
 }
 
 // ── Dirty-doc tracking ───────────────────────────────────────────────────────
-// Instead of re-uploading every doc on every sv() call, we track exactly which
-// Back4App docs have pending changes and flush only those.
+// Instead of re-uploading every row on every sv() call, we track exactly which
+// Supabase rows have pending changes and flush only those.
 const _dirtyDocs={}; // docId -> payload to write
 let _flushTimer=null;
 
@@ -969,7 +967,7 @@ function _markDirty(docId, payload){
   _dirtyDocs[docId]=payload;
 }
 
-// Flush all dirty docs to Back4App immediately (no delay).
+// Flush all dirty docs to Firestore immediately (no delay).
 async function _flushDirty(){
   if(_flushTimer){ clearTimeout(_flushTimer); _flushTimer=null; }
   if(typeof _fb?.setDoc !== 'function') return;
@@ -986,7 +984,7 @@ async function _flushDirty(){
         const ref=_fb.doc(_fb.fsdb,'netiva',id);
         await _fb.setDoc(ref, toWrite[id], {merge:true});
       }
-    }catch(e){ console.warn('Back4App write failed ('+id+'):',e); }
+    }catch(e){ console.warn('Supabase write failed ('+id+'):',e); }
   }));
 }
 
@@ -1008,7 +1006,7 @@ function sv(immediate=false){
   }catch(e){}
   if(!_fbReady) return;
 
-  // Main metadata doc — always dirty when sv() is called
+  // Main metadata row — always dirty when sv() is called
   _markDirty('__main__', null);
 
   // Hero image
@@ -1086,7 +1084,7 @@ function _attachProdListeners(prod){
         try{localStorage.setItem(IMG_DOC_KEY,JSON.stringify(_buildLocalImgCache()));}catch(e){}
         if(!db.adm){_debouncedRender();}
       });
-    }catch(e){console.warn('listener attach failed for '+imgDocId,e);}
+    }catch(e){console.warn('Supabase listener attach failed for '+imgDocId,e);}
   }
   if(!_liveListeners.has(txtDocId)){
     _liveListeners.add(txtDocId);
@@ -1097,7 +1095,7 @@ function _attachProdListeners(prod){
         _applyProdTextDoc(prod.id,snap.data());
         _debouncedRender();
       });
-    }catch(e){console.warn('listener attach failed for '+txtDocId,e);}
+    }catch(e){console.warn('Supabase listener attach failed for '+txtDocId,e);}
   }
 }
 
@@ -1115,7 +1113,7 @@ function _attachRefListener(ref){
       try{localStorage.setItem(IMG_DOC_KEY,JSON.stringify(_buildLocalImgCache()));}catch(e){}
       if(!db.adm){_debouncedRender();}
     });
-  }catch(e){console.warn('listener attach failed for '+docId,e);}
+  }catch(e){console.warn('Supabase listener attach failed for '+docId,e);}
 }
 
 
@@ -1167,7 +1165,7 @@ function _showLoader(){
     </div>`;
 }
 
-// Bootstrap: instant paint from cache, then hydrate from Back4App in two passes
+// Bootstrap: instant paint from cache, then hydrate from Supabase in two passes
 window._boot = async function _boot(){
   // ── Pass 0: render instantly from localStorage (zero network wait) ────────
   let hadCache=false;
@@ -1185,19 +1183,19 @@ window._boot = async function _boot(){
     _showLoader();
   }
 
-  // ── Pass 1: fetch lightweight metadata doc (no images) ───────────────────
+  // ── Pass 1: fetch lightweight metadata row (no images) ───────────────────
   try{
     const snap = await _fb.getDoc(_fb.storeDoc);
     if(snap.exists()){
       _applyRemote(snap.data());
     } else {
-      // First ever run — seed Back4App with defaults
+      // First ever run — seed Firestore with defaults
       const mainSeed=_buildMainPayload();
       mainSeed.products=DEFAULT_PRODS.map(p=>{const{img,imgs,...r}=p;return r;});
       await _fb.setDoc(_fb.storeDoc, mainSeed);
     }
   }catch(e){
-    console.warn('Back4App main read failed:',e);
+    console.warn('Supabase main read failed:',e);
     if(!hadCache){
       const warn=document.createElement('div');
       warn.style.cssText='position:fixed;bottom:12px;left:50%;transform:translateX(-50%);background:#FFF3CD;border:1px solid #EAD0A8;color:#854F0B;font-size:12px;padding:8px 16px;border-radius:8px;z-index:9999;max-width:420px;text-align:center';
@@ -1209,9 +1207,9 @@ window._boot = async function _boot(){
   _fbReady=true;
   try{ go('shop'); }catch(e){}
 
-  // ── Pass 2: fetch all image docs in background (non-blocking) ────────────
+  // ── Pass 2: fetch all image rows in background (non-blocking) ────────────
   // Set flag so snapshot callbacks that fire during listener registration
-  // (Back4App fires watch onChange immediately with the current value) don't
+  // (Firestore fires onSnapshot immediately with the current value) don't
   // trigger extra re-renders while we're still loading everything.
   _bootImgFetchInProgress=true;
   (async()=>{
@@ -1227,7 +1225,7 @@ window._boot = async function _boot(){
           const ref=_fb.doc(_fb.fsdb,'netiva','img_'+prod.id);
           const snap=await _fb.getDoc(ref);
           if(snap.exists()) _applyProdImgDoc(prod.id, snap.data());
-        }catch(e){ console.warn('img read failed for '+prod.id,e); }
+        }catch(e){ console.warn('Supabase img read failed for '+prod.id,e); }
       }));
 
       // Fetch per-product extended text docs
@@ -1236,7 +1234,7 @@ window._boot = async function _boot(){
           const ref=_fb.doc(_fb.fsdb,'netiva','text_'+prod.id);
           const snap=await _fb.getDoc(ref);
           if(snap.exists()) _applyProdTextDoc(prod.id, snap.data());
-        }catch(e){ console.warn('text read failed for '+prod.id,e); }
+        }catch(e){ console.warn('Supabase text read failed for '+prod.id,e); }
       }));
 
       // Fetch per-referrer QR docs
@@ -1245,10 +1243,10 @@ window._boot = async function _boot(){
           const docRef=_fb.doc(_fb.fsdb,'netiva','ref_'+ref.id);
           const snap=await _fb.getDoc(docRef);
           if(snap.exists()) _applyRefDoc(ref.id, snap.data());
-        }catch(e){ console.warn('ref img read failed for '+ref.id,e); }
+        }catch(e){ console.warn('Supabase ref img read failed for '+ref.id,e); }
       }));
 
-      // Also try old shopimages doc for migration (in case data is still there)
+      // Also try old shopimages row for migration (in case data is still there)
       try{
         const oldRef=_fb.doc(_fb.fsdb,'netiva','shopimages');
         const oldSnap=await _fb.getDoc(oldRef);
@@ -1262,7 +1260,7 @@ window._boot = async function _boot(){
       _bootImgFetchInProgress=false;
       // Always re-render after images/text have loaded so they appear for everyone
       try{render();}catch(e){}
-    }catch(e){ _bootImgFetchInProgress=false; console.warn('Back4App image read failed:',e); }
+    }catch(e){ _bootImgFetchInProgress=false; console.warn('Supabase image read failed:',e); }
   })();
 
   // ── Live listeners ────────────────────────────────────────────────────────
@@ -1272,7 +1270,7 @@ window._boot = async function _boot(){
       _applyRemote(snap.data());
       if(!db.adm){ _debouncedRender(); }
     });
-  }catch(e){ console.warn('Back4App main listener failed:',e); }
+  }catch(e){ console.warn('Supabase main listener failed:',e); }
 
   // Live listener for hero image
   try{
@@ -1283,7 +1281,7 @@ window._boot = async function _boot(){
       try{localStorage.setItem(IMG_DOC_KEY,JSON.stringify(_buildLocalImgCache()));}catch(e){}
       if(!db.adm){ _debouncedRender(); }
     });
-  }catch(e){ console.warn('Back4App hero listener failed:',e); }
+  }catch(e){ console.warn('Supabase hero listener failed:',e); }
 
   // Live listeners for each product image/text doc (uses dedup helper)
   (db.products||[]).forEach(prod=>{ _attachProdListeners(prod); });
@@ -1292,8 +1290,8 @@ window._boot = async function _boot(){
   (db.referrers||[]).forEach(ref=>{ _attachRefListener(ref); });
 }
 
-// Wait for Back4App SDK to be ready, then boot
-// Safety fallback: if Back4App SDK never loads (e.g. blocked/offline), boot from cache after 3s
+// Wait for Supabase adapter to be ready, then boot
+// Safety fallback: if Supabase never loads (e.g. blocked/offline), boot from cache after 3s
 setTimeout(()=>{
   if(!_fbReady){
     _fbReady=true;
@@ -1921,7 +1919,7 @@ function prodFormHtml(p,pfx){
     <button onclick="removeProdImg('${pfx}',${i})" style="position:absolute;top:-5px;right:-5px;background:#E24B4A;color:#fff;border:none;border-radius:50%;width:18px;height:18px;font-size:11px;cursor:pointer;display:flex;align-items:center;justify-content:center;padding:0;line-height:1">×</button>
     <div style="font-size:10px;text-align:center;color:var(--color-text-secondary);margin-top:3px">${lang==='en'?'Edit':'编辑'}</div>
   </div>`).join('');
-  return `<div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;margin-bottom:10px"><div class="fl"><label>${t('productName')} (EN)</label><input type="text" id="${pfx}name_en" value="${p?.name_en||''}" placeholder="e.g. Wildflower Honey"></div><div class="fl"><label>${t('productName')} (简体)</label><input type="text" id="${pfx}name_zh" value="${p?.name_zh||''}" placeholder="例如：野花蜂蜜"></div><div class="fl"><label>${t('productName')} (繁體)</label><input type="text" id="${pfx}name_zht" value="${p?.name_zht||''}" placeholder="例如：野花蜂蜜"></div></div><div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;margin-bottom:10px"><div class="fl"><label>${t('description')} (EN)</label>${rteHtml(pfx+'desc_en', p?.desc_en||'', 'e.g. Raw &amp; unfiltered')}</div><div class="fl"><label>${t('description')} (简体)</label>${rteHtml(pfx+'desc_zh', p?.desc_zh||'', '例如：原味未过滤')}</div><div class="fl"><label>${t('description')} (繁體)</label>${rteHtml(pfx+'desc_zht', p?.desc_zht||'', '例如：原味未過濾')}</div></div><div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;margin-bottom:10px"><div class="fl"><label style="display:flex;align-items:center;justify-content:space-between">${lang==='en'?'Full Details / Story':'产品详情 / 故事'} (EN) <span style="font-size:11px;color:var(--color-text-tertiary);font-weight:400">${lang==='en'?'Saved in its own Back4App doc':'保存于独立文档'}</span></label>${rteHtml(pfx+'content_en', p?.content_en||'', lang==='en'?'e.g. Origin story, sourcing details, usage tips…':'例如：产地故事、采购信息、使用建议…')}</div><div class="fl"><label>${lang==='en'?'Full Details / Story':'产品详情 / 故事'} (简体)</label>${rteHtml(pfx+'content_zh', p?.content_zh||'', '例如：产地故事、采购信息…')}</div><div class="fl"><label>${lang==='en'?'Full Details / Story':'產品詳情 / 故事'} (繁體)</label>${rteHtml(pfx+'content_zht', p?.content_zht||'', '例如：產地故事、採購資訊…')}</div></div><div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;margin-bottom:10px"><div class="fl"><label>${t('tagLabel')} (EN)</label><input type="text" id="${pfx}tag_en" value="${p?.tag_en||''}" placeholder="e.g. Organic"></div><div class="fl"><label>${t('tagLabel')} (简体)</label><input type="text" id="${pfx}tag_zh" value="${p?.tag_zh||''}" placeholder="例如：有机"></div><div class="fl"><label>${t('tagLabel')} (繁體)</label><input type="text" id="${pfx}tag_zht" value="${p?.tag_zht||''}" placeholder="例如：有機"></div></div><div class="g2" style="margin-bottom:10px"><div class="fl"><label>${t('emojiIcon')}</label><input type="text" id="${pfx}icon" value="${v('icon')}" placeholder="🍯"></div><div class="fl"><label>${t('usdPrice')}</label><input type="number" id="${pfx}usdPrice" value="${v('usdPrice')}" placeholder="0.00" step="0.01" min="0"></div></div><div class="fl" style="margin-bottom:10px"><label>${t('status')}</label><select id="${pfx}active"><option value="1" ${(!p||p.active)?'selected':''}>${t('active')}</option><option value="0" ${(p&&!p.active)?'selected':''}>${t('inactive')}</option></select></div>
+  return `<div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;margin-bottom:10px"><div class="fl"><label>${t('productName')} (EN)</label><input type="text" id="${pfx}name_en" value="${p?.name_en||''}" placeholder="e.g. Wildflower Honey"></div><div class="fl"><label>${t('productName')} (简体)</label><input type="text" id="${pfx}name_zh" value="${p?.name_zh||''}" placeholder="例如：野花蜂蜜"></div><div class="fl"><label>${t('productName')} (繁體)</label><input type="text" id="${pfx}name_zht" value="${p?.name_zht||''}" placeholder="例如：野花蜂蜜"></div></div><div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;margin-bottom:10px"><div class="fl"><label>${t('description')} (EN)</label>${rteHtml(pfx+'desc_en', p?.desc_en||'', 'e.g. Raw &amp; unfiltered')}</div><div class="fl"><label>${t('description')} (简体)</label>${rteHtml(pfx+'desc_zh', p?.desc_zh||'', '例如：原味未过滤')}</div><div class="fl"><label>${t('description')} (繁體)</label>${rteHtml(pfx+'desc_zht', p?.desc_zht||'', '例如：原味未過濾')}</div></div><div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;margin-bottom:10px"><div class="fl"><label style="display:flex;align-items:center;justify-content:space-between">${lang==='en'?'Full Details / Story':'产品详情 / 故事'} (EN) <span style="font-size:11px;color:var(--color-text-tertiary);font-weight:400">${lang==='en'?'Saved in its own Supabase row':'保存于独立文档'}</span></label>${rteHtml(pfx+'content_en', p?.content_en||'', lang==='en'?'e.g. Origin story, sourcing details, usage tips…':'例如：产地故事、采购信息、使用建议…')}</div><div class="fl"><label>${lang==='en'?'Full Details / Story':'产品详情 / 故事'} (简体)</label>${rteHtml(pfx+'content_zh', p?.content_zh||'', '例如：产地故事、采购信息…')}</div><div class="fl"><label>${lang==='en'?'Full Details / Story':'產品詳情 / 故事'} (繁體)</label>${rteHtml(pfx+'content_zht', p?.content_zht||'', '例如：產地故事、採購資訊…')}</div></div><div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;margin-bottom:10px"><div class="fl"><label>${t('tagLabel')} (EN)</label><input type="text" id="${pfx}tag_en" value="${p?.tag_en||''}" placeholder="e.g. Organic"></div><div class="fl"><label>${t('tagLabel')} (简体)</label><input type="text" id="${pfx}tag_zh" value="${p?.tag_zh||''}" placeholder="例如：有机"></div><div class="fl"><label>${t('tagLabel')} (繁體)</label><input type="text" id="${pfx}tag_zht" value="${p?.tag_zht||''}" placeholder="例如：有機"></div></div><div class="g2" style="margin-bottom:10px"><div class="fl"><label>${t('emojiIcon')}</label><input type="text" id="${pfx}icon" value="${v('icon')}" placeholder="🍯"></div><div class="fl"><label>${t('usdPrice')}</label><input type="number" id="${pfx}usdPrice" value="${v('usdPrice')}" placeholder="0.00" step="0.01" min="0"></div></div><div class="fl" style="margin-bottom:10px"><label>${t('status')}</label><select id="${pfx}active"><option value="1" ${(!p||p.active)?'selected':''}>${t('active')}</option><option value="0" ${(p&&!p.active)?'selected':''}>${t('inactive')}</option></select></div>
   <div style="margin-bottom:10px">
     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px">
       <label style="font-size:12px;color:var(--color-text-secondary);font-weight:500">${lang==='en'?'Variants (sizes / flavours / colours)':lang==='zht'?'規格（尺寸 / 口味 / 顏色）':'规格（尺寸 / 口味 / 颜色）'}</label>
@@ -2151,7 +2149,7 @@ function saveAdminSettings(){const em=document.getElementById('stg-email').value
 function toggleFeeEdit(){const ed=document.getElementById('fee-edit'),disp=document.getElementById('fee-display');if(!ed||!disp)return;const isOpen=ed.style.display==='block';ed.style.display=isOpen?'none':'block';if(!isOpen){document.getElementById('fee-input').value=(FEE_RATE*100).toFixed(4).replace(/\.?0+$/,'');document.getElementById('fee-input').focus();}}
 function saveFeeRate(){const inp=document.getElementById('fee-input'),msg=document.getElementById('fee-msg');const v=parseFloat(inp.value);if(isNaN(v)||v<0||v>100){msg.innerHTML=`<div class="m e" style="font-size:11px;padding:4px 8px">${lang==='en'?'Enter 0–100':(lang==='zht'?'請輸入 0–100':'请输入 0–100')}</div>`;return;}FEE_RATE=parseFloat((v/100).toFixed(6));sv(true);document.getElementById('fee-display').textContent=(v).toFixed(2).replace(/\.?0+$/,'')+'%';document.getElementById('fee-edit').style.display='none';msg.innerHTML='';}
 
-// Boot is handled by _boot() above — triggered once Back4App is ready
+// Boot is handled by _boot() above — triggered once Supabase adapter is ready
 </script>
 
 <script>
