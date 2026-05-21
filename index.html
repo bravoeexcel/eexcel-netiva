@@ -96,6 +96,12 @@
     .fpill { padding: 6px 16px; border-radius: 999px; font-size: 12px; font-weight: 500; cursor: pointer; border: 1px solid var(--color-border-secondary); background: transparent; color: var(--color-text-secondary); transition: all .15s; letter-spacing: .02em; }
     .fpill:hover { border-color: var(--color-accent); color: var(--color-accent); background: var(--color-accent-light); }
     .fpill.on { background: var(--color-accent); color: #fff; border-color: transparent; box-shadow: 0 1px 4px rgba(49,64,33,.2); }
+    /* Category bar */
+    .cat-bar { display: flex; gap: 8px; padding: 10px 16px; background: var(--color-background-primary); border-bottom: 1px solid var(--color-border-tertiary); overflow-x: auto; -webkit-overflow-scrolling: touch; scrollbar-width: none; white-space: nowrap; }
+    .cat-bar::-webkit-scrollbar { display: none; }
+    .cat-pill { flex-shrink: 0; display: inline-flex; align-items: center; padding: 6px 16px; border-radius: 999px; font-size: 12px; font-weight: 500; cursor: pointer; border: 1px solid var(--color-border-secondary); background: transparent; color: var(--color-text-secondary); transition: all .15s; letter-spacing: .01em; white-space: nowrap; }
+    .cat-pill:hover { border-color: var(--color-accent); color: var(--color-accent); background: var(--color-accent-light); }
+    .cat-pill.on { background: var(--color-accent); color: #fff; border-color: transparent; box-shadow: 0 1px 4px rgba(49,64,33,.2); }
 
     .prods { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 20px; padding: 2rem; background: var(--color-background-secondary); }
     .pc { background: var(--color-background-primary); border: 1px solid var(--color-border-tertiary); border-radius: var(--border-radius-lg); overflow: hidden; transition: all .2s; }
@@ -374,9 +380,37 @@
       .hero { min-height: 440px; }
       .hero h1 { font-size: 32px; }
       .hero p { font-size: 15px; }
-      /* Product grid: 2 columns on mobile */
-      .prods { grid-template-columns: repeat(2, 1fr); gap: 12px; padding: 1rem; }
-      .pi { height: 140px; font-size: 44px; }
+      /* Product grid: Taobao-style 2-column masonry feed on mobile */
+      .prods {
+        display: block !important;
+        columns: 2;
+        column-gap: 8px;
+        padding: 8px;
+        background: #f4f4f4;
+      }
+      .pc {
+        break-inside: avoid;
+        display: inline-block;
+        width: 100%;
+        border-radius: 10px;
+        margin-bottom: 8px;
+        border: none;
+        box-shadow: 0 1px 4px rgba(0,0,0,.06);
+        overflow: hidden;
+      }
+      /* Alternate image heights for visual rhythm */
+      .pc:nth-child(4n+1) .pi,
+      .pc:nth-child(4n+4) .pi { height: 190px; }
+      .pc:nth-child(4n+2) .pi,
+      .pc:nth-child(4n+3) .pi { height: 155px; }
+      .pi { font-size: 44px; border-radius: 0; }
+      .pb { padding: 8px 10px 12px; }
+      .pn { font-size: 13px; font-weight: 500; line-height: 1.4; margin-bottom: 4px; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+      .pf { flex-direction: column; align-items: flex-start; gap: 4px; margin-top: 4px; }
+      .price-cny { font-size: 16px; }
+      .price-usd { font-size: 10px; }
+      .ab { font-size: 11px; padding: 5px 10px; width: 100%; text-align: center; border-radius: 999px; display: block; }
+      .tag { font-size: 10px; padding: 1px 6px; margin-bottom: 3px; }
       .prod-modal { max-width: 100%; }
       .prod-modal-main-img { height: 260px; }
       .prod-modal-main-emoji { height: 200px; font-size: 80px; }
@@ -579,6 +613,13 @@
 let FEE_RATE=0.015;
 let rate=0;
 let lang='en';
+const CATEGORIES=[
+  {id:'signature', en:'Signature Products',   zh:'特色营养产品', zht:'特色營養產品'},
+  {id:'beverages', en:'Beverages',             zh:'饮品',         zht:'飲品'},
+  {id:'capsules',  en:'Capsule Supplements',   zh:'完整性胶囊补品',zht:'完整性膠囊補品'},
+  {id:'home',      en:'Healthy Home Products', zh:'健康家用产品',  zht:'健康家用產品'},
+  {id:'elemente',  en:'Elemente®',             zh:'菁元素',        zht:'菁元素'},
+];
 
 const T={
   en:{
@@ -1293,6 +1334,7 @@ function vPrice(p,v){return p.usdPrice+(v?v.priceDelta||0:0);}
 let selectedVariants={};
 // Search query state
 let searchQuery='';
+let selectedCat='';
 
 let cart=[],editingRefId=null,editingProdId=null;
 
@@ -1467,7 +1509,7 @@ function _updateNavTheme(v){
     if(mobBtn){mobBtn.style.background='rgba(255,255,255,.15)';mobBtn.style.border='1px solid rgba(255,255,255,.3)';mobBtn.style.color='#fff';}
   }
 }
-function go(v){vw=v;closeCart();editingRefId=null;editingProdId=null;if(v==='shop'){selectedVariants={};searchQuery='';document.onkeydown=null;}
+function go(v){vw=v;closeCart();editingRefId=null;editingProdId=null;if(v==='shop'){selectedVariants={};searchQuery='';selectedCat='';document.onkeydown=null;}
   // Hide/show pdp vs root
   const pdpEl=document.getElementById('pdp');const rootEl=document.getElementById('root');
   if(v.startsWith('pdp:')){
@@ -1535,6 +1577,10 @@ function rShop(r){
       <button id="search-clear" onclick="onSearch('')" style="display:${searchQuery?'flex':'none'};position:absolute;right:8px;top:50%;transform:translateY(-50%);background:none;border:none;cursor:pointer;align-items:center;justify-content:center;width:20px;height:20px;border-radius:50%;color:var(--color-text-tertiary);font-size:16px;line-height:1;padding:0">×</button>
     </div>
   </div>
+  <div class="cat-bar" id="cat-bar">
+    <button class="cat-pill${selectedCat===''?' on':''}" onclick="onCat('')">${lang==='zh'?'全部':lang==='zht'?'全部':'All'}</button>
+    ${CATEGORIES.map(c=>`<button class="cat-pill${selectedCat===c.id?' on':''}" onclick="onCat('${c.id}')">${lang==='zh'?c.zh:lang==='zht'?c.zht:c.en}</button>`).join('')}
+  </div>
   <div class="prods" id="mp"></div>`;
   rShopProducts();
 }
@@ -1567,11 +1613,18 @@ function onSearch(val){
   const clr=document.getElementById('search-clear');if(clr)clr.style.display=val?'flex':'none';
   rShopProducts();
 }
+function onCat(id){
+  selectedCat=id;
+  // update pill active states
+  document.querySelectorAll('.cat-pill').forEach(b=>b.classList.toggle('on',b.getAttribute('onclick')===`onCat('${id}')`||(id===''&&b.getAttribute('onclick')==="onCat('')")));
+  rShopProducts();
+}
 function rShopProducts(){
   const grid=document.getElementById('mp');if(!grid)return;
   const q=searchQuery.trim().toLowerCase();
   const filtered=db.products.filter(p=>{
     if(!p.active)return false;
+    if(selectedCat&&p.category!==selectedCat)return false;
     if(!q)return true;
     return (p.name_en||'').toLowerCase().includes(q)||(p.name_zh||'').toLowerCase().includes(q)||(p.name_zht||'').toLowerCase().includes(q)||(p.tag_en||'').toLowerCase().includes(q)||(p.tag_zh||'').toLowerCase().includes(q)||(p.category||'').toLowerCase().includes(q);
   });
@@ -1898,8 +1951,7 @@ function prodFormHtml(p,pfx){
     <button onclick="removeProdImg('${pfx}',${i})" style="position:absolute;top:-5px;right:-5px;background:#E24B4A;color:#fff;border:none;border-radius:50%;width:18px;height:18px;font-size:11px;cursor:pointer;display:flex;align-items:center;justify-content:center;padding:0;line-height:1">×</button>
     <div style="font-size:10px;text-align:center;color:var(--color-text-secondary);margin-top:3px">${lang==='en'?'Edit':'编辑'}</div>
   </div>`).join('');
-  return `<div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;margin-bottom:10px"><div class="fl"><label>${t('productName')} (EN)</label><input type="text" id="${pfx}name_en" value="${p?.name_en||''}" placeholder="e.g. Wildflower Honey"></div><div class="fl"><label>${t('productName')} (简体)</label><input type="text" id="${pfx}name_zh" value="${p?.name_zh||''}" placeholder="例如：野花蜂蜜"></div><div class="fl"><label>${t('productName')} (繁體)</label><input type="text" id="${pfx}name_zht" value="${p?.name_zht||''}" placeholder="例如：野花蜂蜜"></div></div><div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;margin-bottom:10px"><div class="fl"><label>${t('description')} (EN)</label>${rteHtml(pfx+'desc_en', p?.desc_en||'', 'e.g. Raw &amp; unfiltered')}</div><div class="fl"><label>${t('description')} (简体)</label>${rteHtml(pfx+'desc_zh', p?.desc_zh||'', '例如：原味未过滤')}</div><div class="fl"><label>${t('description')} (繁體)</label>${rteHtml(pfx+'desc_zht', p?.desc_zht||'', '例如：原味未過濾')}</div></div><div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;margin-bottom:10px"><div class="fl"><label style="display:flex;align-items:center;justify-content:space-between">${lang==='en'?'Full Details / Story':'产品详情 / 故事'} (EN) <span style="font-size:11px;color:var(--color-text-tertiary);font-weight:400">${lang==='en'?'Saved in its own Supabase row':'保存于独立文档'}</span></label>${rteHtml(pfx+'content_en', p?.content_en||'', lang==='en'?'e.g. Origin story, sourcing details, usage tips…':'例如：产地故事、采购信息、使用建议…')}</div><div class="fl"><label>${lang==='en'?'Full Details / Story':'产品详情 / 故事'} (简体)</label>${rteHtml(pfx+'content_zh', p?.content_zh||'', '例如：产地故事、采购信息…')}</div><div class="fl"><label>${lang==='en'?'Full Details / Story':'產品詳情 / 故事'} (繁體)</label>${rteHtml(pfx+'content_zht', p?.content_zht||'', '例如：產地故事、採購資訊…')}</div></div><div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;margin-bottom:10px"><div class="fl"><label>${t('tagLabel')} (EN)</label><input type="text" id="${pfx}tag_en" value="${p?.tag_en||''}" placeholder="e.g. Organic"></div><div class="fl"><label>${t('tagLabel')} (简体)</label><input type="text" id="${pfx}tag_zh" value="${p?.tag_zh||''}" placeholder="例如：有机"></div><div class="fl"><label>${t('tagLabel')} (繁體)</label><input type="text" id="${pfx}tag_zht" value="${p?.tag_zht||''}" placeholder="例如：有機"></div></div><div class="g2" style="margin-bottom:10px"><div class="fl"><label>${t('emojiIcon')}</label><input type="text" id="${pfx}icon" value="${v('icon')}" placeholder="🍯"></div><div class="fl"><label>${t('usdPrice')}</label><input type="number" id="${pfx}usdPrice" value="${v('usdPrice')}" placeholder="0.00" step="0.01" min="0"></div></div><div class="fl" style="margin-bottom:10px"><label>${t('status')}</label><select id="${pfx}active"><option value="1" ${(!p||p.active)?'selected':''}>${t('active')}</option><option value="0" ${(p&&!p.active)?'selected':''}>${t('inactive')}</option></select></div>
-  <div style="margin-bottom:10px">
+  return `<div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;margin-bottom:10px"><div class="fl"><label>${t('productName')} (EN)</label><input type="text" id="${pfx}name_en" value="${p?.name_en||''}" placeholder="e.g. Wildflower Honey"></div><div class="fl"><label>${t('productName')} (简体)</label><input type="text" id="${pfx}name_zh" value="${p?.name_zh||''}" placeholder="例如：野花蜂蜜"></div><div class="fl"><label>${t('productName')} (繁體)</label><input type="text" id="${pfx}name_zht" value="${p?.name_zht||''}" placeholder="例如：野花蜂蜜"></div></div><div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;margin-bottom:10px"><div class="fl"><label>${t('description')} (EN)</label>${rteHtml(pfx+'desc_en', p?.desc_en||'', 'e.g. Raw &amp; unfiltered')}</div><div class="fl"><label>${t('description')} (简体)</label>${rteHtml(pfx+'desc_zh', p?.desc_zh||'', '例如：原味未过滤')}</div><div class="fl"><label>${t('description')} (繁體)</label>${rteHtml(pfx+'desc_zht', p?.desc_zht||'', '例如：原味未過濾')}</div></div><div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;margin-bottom:10px"><div class="fl"><label style="display:flex;align-items:center;justify-content:space-between">${lang==='en'?'Full Details / Story':'产品详情 / 故事'} (EN) <span style="font-size:11px;color:var(--color-text-tertiary);font-weight:400">${lang==='en'?'Saved in its own Supabase row':'保存于独立文档'}</span></label>${rteHtml(pfx+'content_en', p?.content_en||'', lang==='en'?'e.g. Origin story, sourcing details, usage tips…':'例如：产地故事、采购信息、使用建议…')}</div><div class="fl"><label>${lang==='en'?'Full Details / Story':'产品详情 / 故事'} (简体)</label>${rteHtml(pfx+'content_zh', p?.content_zh||'', '例如：产地故事、采购信息…')}</div><div class="fl"><label>${lang==='en'?'Full Details / Story':'產品詳情 / 故事'} (繁體)</label>${rteHtml(pfx+'content_zht', p?.content_zht||'', '例如：產地故事、採購資訊…')}</div></div><div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;margin-bottom:10px"><div class="fl"><label>${t('tagLabel')} (EN)</label><input type="text" id="${pfx}tag_en" value="${p?.tag_en||''}" placeholder="e.g. Organic"></div><div class="fl"><label>${t('tagLabel')} (简体)</label><input type="text" id="${pfx}tag_zh" value="${p?.tag_zh||''}" placeholder="例如：有机"></div><div class="fl"><label>${t('tagLabel')} (繁體)</label><input type="text" id="${pfx}tag_zht" value="${p?.tag_zht||''}" placeholder="例如：有機"></div></div><div class="g2" style="margin-bottom:10px"><div class="fl"><label>${t('emojiIcon')}</label><input type="text" id="${pfx}icon" value="${v('icon')}" placeholder="🍯"></div><div class="fl"><label>${t('usdPrice')}</label><input type="number" id="${pfx}usdPrice" value="${v('usdPrice')}" placeholder="0.00" step="0.01" min="0"></div></div><div class="fl" style="margin-bottom:10px"><label>${t('status')}</label><select id="${pfx}active"><option value="1" ${(!p||p.active)?'selected':''}>${t('active')}</option><option value="0" ${(p&&!p.active)?'selected':''}>${t('inactive')}</option></select></div><div class="fl" style="margin-bottom:10px"><label>${t('category')}</label><select id="${pfx}category">${CATEGORIES.map(c=>`<option value="${c.id}" ${p?.category===c.id?'selected':''}>${c.en} / ${c.zht}</option>`).join('')}</select></div>
     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px">
       <label style="font-size:12px;color:var(--color-text-secondary);font-weight:500">${lang==='en'?'Variants (sizes / flavours / colours)':lang==='zht'?'規格（尺寸 / 口味 / 顏色）':'规格（尺寸 / 口味 / 颜色）'}</label>
       <button class="btn sm" onclick="addVar('${pfx}')">${lang==='en'?'+ Add':lang==='zht'?'+ 新增':'+ 添加'}</button>
@@ -2072,9 +2124,9 @@ function handleProdImgs(e,pfx){
   });
 }
 function startAddProd(){editingProdId='new';rAdmProds(document.getElementById('atc'));const slot=document.getElementById('prod-add-slot');slot.innerHTML=`<div class="prod-edit-form"><div style="font-size:14px;font-weight:500;margin-bottom:12px">${t('addProductTitle')}</div><div id="add-prod-msg"></div>${prodFormHtml(null,'np-')}<div style="display:flex;gap:8px;margin-top:12px"><button class="btn p sm" onclick="saveNewProd()">${t('saveProduct')}</button><button class="btn sm" onclick="editingProdId=null;rAdmProds(document.getElementById('atc'))">${t('cancel')}</button></div></div>`;slot.scrollIntoView({behavior:'smooth',block:'nearest'});}
-function saveNewProd(){const msg=document.getElementById('add-prod-msg');const name_en=document.getElementById('np-name_en').value.trim(),name_zh=document.getElementById('np-name_zh').value.trim(),name_zht=document.getElementById('np-name_zht').value.trim(),desc_en=getRteHtml('np-desc_en'),desc_zh=getRteHtml('np-desc_zh'),desc_zht=getRteHtml('np-desc_zht'),content_en=getRteHtml('np-content_en'),content_zh=getRteHtml('np-content_zh'),content_zht=getRteHtml('np-content_zht'),tag_en=document.getElementById('np-tag_en').value.trim(),tag_zh=document.getElementById('np-tag_zh').value.trim(),tag_zht=document.getElementById('np-tag_zht').value.trim(),icon=document.getElementById('np-icon').value.trim(),usdPrice=parseFloat(document.getElementById('np-usdPrice').value),active=document.getElementById('np-active').value==='1',imgs=window['np-imgs']||[],img=imgs[0]||'',variants=collectVarFields('np-');if((!name_en&&!name_zh)||isNaN(usdPrice)||usdPrice<=0){msg.innerHTML=`<div class="m e">${t('errorNamePrice')}</div>`;return;}const _newProd={id:'p'+Date.now(),name_en,name_zh,name_zht,desc_en,desc_zh,desc_zht,content_en,content_zh,content_zht,tag_en,tag_zh,tag_zht,icon,usdPrice,active,img,imgs,variants};db.products.push(_newProd);window['np-imgs']=undefined;window['np-variants']=undefined;svProd(_newProd.id,true);_attachProdListeners(_newProd);editingProdId=null;msg.innerHTML=`<div class="m s">${t('productAdded')}</div>`;setTimeout(()=>rAdmProds(document.getElementById('atc')),800);}
+function saveNewProd(){const msg=document.getElementById('add-prod-msg');const name_en=document.getElementById('np-name_en').value.trim(),name_zh=document.getElementById('np-name_zh').value.trim(),name_zht=document.getElementById('np-name_zht').value.trim(),desc_en=getRteHtml('np-desc_en'),desc_zh=getRteHtml('np-desc_zh'),desc_zht=getRteHtml('np-desc_zht'),content_en=getRteHtml('np-content_en'),content_zh=getRteHtml('np-content_zh'),content_zht=getRteHtml('np-content_zht'),tag_en=document.getElementById('np-tag_en').value.trim(),tag_zh=document.getElementById('np-tag_zh').value.trim(),tag_zht=document.getElementById('np-tag_zht').value.trim(),icon=document.getElementById('np-icon').value.trim(),usdPrice=parseFloat(document.getElementById('np-usdPrice').value),active=document.getElementById('np-active').value==='1',category=document.getElementById('np-category')?.value||'',imgs=window['np-imgs']||[],img=imgs[0]||'',variants=collectVarFields('np-');if((!name_en&&!name_zh)||isNaN(usdPrice)||usdPrice<=0){msg.innerHTML=`<div class="m e">${t('errorNamePrice')}</div>`;return;}const _newProd={id:'p'+Date.now(),name_en,name_zh,name_zht,desc_en,desc_zh,desc_zht,content_en,content_zh,content_zht,tag_en,tag_zh,tag_zht,icon,usdPrice,active,category,img,imgs,variants};db.products.push(_newProd);window['np-imgs']=undefined;window['np-variants']=undefined;svProd(_newProd.id,true);_attachProdListeners(_newProd);editingProdId=null;msg.innerHTML=`<div class="m s">${t('productAdded')}</div>`;setTimeout(()=>rAdmProds(document.getElementById('atc')),800);}
 function startEditProd(id){editingProdId=editingProdId===id?null:id;rAdmProds(document.getElementById('atc'));if(editingProdId===id){const slot=document.getElementById('prod-edit-'+id),p=db.products.find(x=>x.id===id);slot.innerHTML=`<div class="prod-edit-form"><div id="ep-msg-${id}"></div>${prodFormHtml(p,'ep'+id+'-')}<div style="display:flex;gap:8px;margin-top:12px"><button class="btn p sm" onclick="saveEditProd('${id}')">${t('saveChanges')}</button><button class="btn sm" onclick="startEditProd('${id}')">${t('cancel')}</button></div></div>`;slot.scrollIntoView({behavior:'smooth',block:'nearest'});}}
-function saveEditProd(id){const pfx='ep'+id+'-',msg=document.getElementById('ep-msg-'+id);const name_en=document.getElementById(pfx+'name_en').value.trim(),name_zh=document.getElementById(pfx+'name_zh').value.trim(),name_zht=document.getElementById(pfx+'name_zht').value.trim(),desc_en=getRteHtml(pfx+'desc_en'),desc_zh=getRteHtml(pfx+'desc_zh'),desc_zht=getRteHtml(pfx+'desc_zht'),content_en=getRteHtml(pfx+'content_en'),content_zh=getRteHtml(pfx+'content_zh'),content_zht=getRteHtml(pfx+'content_zht'),tag_en=document.getElementById(pfx+'tag_en').value.trim(),tag_zh=document.getElementById(pfx+'tag_zh').value.trim(),tag_zht=document.getElementById(pfx+'tag_zht').value.trim(),icon=document.getElementById(pfx+'icon').value.trim(),usdPrice=parseFloat(document.getElementById(pfx+'usdPrice').value),active=document.getElementById(pfx+'active').value==='1',imgs=window[pfx+'imgs']!==undefined?window[pfx+'imgs']:(db.products.find(x=>x.id===id)?.imgs||[]),img=imgs[0]||(db.products.find(x=>x.id===id)?.img||''),variants=collectVarFields(pfx);if((!name_en&&!name_zh)||isNaN(usdPrice)||usdPrice<=0){msg.innerHTML=`<div class="m e">${t('errorNamePrice')}</div>`;return;}Object.assign(db.products.find(x=>x.id===id),{name_en,name_zh,name_zht,desc_en,desc_zh,desc_zht,content_en,content_zh,content_zht,tag_en,tag_zh,tag_zht,icon,usdPrice,active,img,imgs,variants});window[pfx+'imgs']=undefined;window[pfx+'variants']=undefined;svProd(id,true);editingProdId=null;rAdmProds(document.getElementById('atc'));}
+function saveEditProd(id){const pfx='ep'+id+'-',msg=document.getElementById('ep-msg-'+id);const name_en=document.getElementById(pfx+'name_en').value.trim(),name_zh=document.getElementById(pfx+'name_zh').value.trim(),name_zht=document.getElementById(pfx+'name_zht').value.trim(),desc_en=getRteHtml(pfx+'desc_en'),desc_zh=getRteHtml(pfx+'desc_zh'),desc_zht=getRteHtml(pfx+'desc_zht'),content_en=getRteHtml(pfx+'content_en'),content_zh=getRteHtml(pfx+'content_zh'),content_zht=getRteHtml(pfx+'content_zht'),tag_en=document.getElementById(pfx+'tag_en').value.trim(),tag_zh=document.getElementById(pfx+'tag_zh').value.trim(),tag_zht=document.getElementById(pfx+'tag_zht').value.trim(),icon=document.getElementById(pfx+'icon').value.trim(),usdPrice=parseFloat(document.getElementById(pfx+'usdPrice').value),active=document.getElementById(pfx+'active').value==='1',category=document.getElementById(pfx+'category')?.value||'',imgs=window[pfx+'imgs']!==undefined?window[pfx+'imgs']:(db.products.find(x=>x.id===id)?.imgs||[]),img=imgs[0]||(db.products.find(x=>x.id===id)?.img||''),variants=collectVarFields(pfx);if((!name_en&&!name_zh)||isNaN(usdPrice)||usdPrice<=0){msg.innerHTML=`<div class="m e">${t('errorNamePrice')}</div>`;return;}Object.assign(db.products.find(x=>x.id===id),{name_en,name_zh,name_zht,desc_en,desc_zh,desc_zht,content_en,content_zh,content_zht,tag_en,tag_zh,tag_zht,icon,usdPrice,active,category,img,imgs,variants});window[pfx+'imgs']=undefined;window[pfx+'variants']=undefined;svProd(id,true);editingProdId=null;rAdmProds(document.getElementById('atc'));}
 function toggleProd(id){const p=db.products.find(x=>x.id===id);if(!p)return;p.active=!p.active;sv(true);rAdmProds(document.getElementById('atc'));}
 function deleteProd(id){db.products=db.products.filter(x=>x.id!==id);sv(true);rAdmProds(document.getElementById('atc'));}
 
