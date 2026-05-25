@@ -433,8 +433,47 @@
     const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImZua3Nka3V6dXhwY3d0bWZkZGljIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzkyMTQ3NjgsImV4cCI6MjA5NDc5MDc2OH0.nVQOSMC_Lf5LbcSR99TuHM3PSr--ap8xtP6Fxe7lwDM';
     const TABLE = 'netiva_store';
     const MAIN_DOC = 'shopdata';
+    // Supabase Storage bucket name — create this bucket in your Supabase dashboard
+    // (Storage → New bucket → name: "netiva-images" → Public: ON)
+    const STORAGE_BUCKET = 'netiva-images';
 
     const sb = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+
+    // ── Storage helpers ───────────────────────────────────────────────────────
+    // uploadImage(path, base64DataUrl) → returns public URL string or null
+    // path example: 'hero/banner.jpg', 'products/p1_0.jpg', 'referrers/r1_alipay.jpg'
+    window._fb.uploadImage = async function(path, base64DataUrl){
+      try{
+        // Convert base64 data URL to a Blob
+        const [meta, b64] = base64DataUrl.split(',');
+        const mime = (meta.match(/:(.*?);/)||[])[1] || 'image/jpeg';
+        const binary = atob(b64);
+        const bytes = new Uint8Array(binary.length);
+        for(let i=0;i<binary.length;i++) bytes[i]=binary.charCodeAt(i);
+        const blob = new Blob([bytes], {type: mime});
+        const ext = mime.split('/')[1]||'jpg';
+        const fullPath = path.endsWith('.'+ext) ? path : path+'.'+ext;
+
+        const {data, error} = await sb.storage.from(STORAGE_BUCKET).upload(fullPath, blob, {
+          upsert: true,
+          contentType: mime,
+          cacheControl: '31536000', // 1-year browser cache — eliminates repeat downloads
+        });
+        if(error){ console.error('Storage upload error:', error); return null; }
+        const {data: urlData} = sb.storage.from(STORAGE_BUCKET).getPublicUrl(fullPath);
+        return urlData.publicUrl;
+      }catch(e){ console.error('Storage upload threw:', e); return null; }
+    };
+
+    // deleteImage(path) — clean up old images from storage
+    window._fb.deleteImage = async function(path){
+      try{ await sb.storage.from(STORAGE_BUCKET).remove([path]); }catch(e){}
+    };
+
+    // isBase64(str) — detect legacy base64 strings so we can migrate them on-the-fly
+    window._fb.isBase64 = function(str){ return typeof str==='string' && str.startsWith('data:image'); };
+
+    // ── Database helpers ──────────────────────────────────────────────────────
 
     // doc() — mirrors Firestore's doc(db, collection, id)
     function sbDoc(fsdb_unused, collection_unused, docId){ return {_table:TABLE, _id:docId}; }
@@ -463,6 +502,7 @@
     }
 
     // onSnapshot(ref, callback) — Realtime with polling fallback
+    // Polling interval raised from 4s → 60s to cut egress from background tabs
     const _snapChannels = {};
     function sbOnSnapshot(ref, callback){
       const key = ref._id;
@@ -472,10 +512,11 @@
           async ()=>{ const snap=await sbGetDoc(ref); callback(snap); })
         .subscribe((status)=>{
           if(status==='CHANNEL_ERROR'||status==='TIMED_OUT'){
-            if(!_snapChannels[key+'_poll']){
+            // Only poll the lightweight main doc; skip image rows (URLs don't change often)
+            if(!_snapChannels[key+'_poll'] && key===MAIN_DOC){
               _snapChannels[key+'_poll']=setInterval(async()=>{
                 const snap=await sbGetDoc(ref); callback(snap);
-              },4000);
+              },60000); // 60s instead of 4s — 15× less polling egress
             }
           }
         });
@@ -1280,6 +1321,8 @@ window._boot = async function _boot(){
       _bootImgFetchInProgress=false;
       // Always re-render after images/text have loaded so they appear for everyone
       try{render();}catch(e){}
+      // Migrate any legacy base64 images to Storage in the background
+      setTimeout(()=>{ _migrateBase64ToStorage().catch(e=>console.warn('[migrate] error:',e)); }, 2000);
     }catch(e){ _bootImgFetchInProgress=false; console.warn('Supabase image read failed:',e); }
   })();
 
@@ -1308,6 +1351,59 @@ window._boot = async function _boot(){
 
   // Live listeners for each referrer QR doc (uses dedup helper)
   (db.referrers||[]).forEach(ref=>{ _attachRefListener(ref); });
+}
+
+
+// ── One-time migration: move any legacy base64 images from DB rows to Supabase Storage ──
+// Runs silently in background after boot. Only migrates if uploadImage is available
+// and the stored value starts with 'data:image'. Safe to run repeatedly (idempotent).
+async function _migrateBase64ToStorage(){
+  if(!_fb.uploadImage || !_fb.isBase64) return;
+  let migrated=false;
+
+  // Hero image
+  if(_fb.isBase64(db.heroImage)){
+    console.log('[migrate] uploading hero image to Storage...');
+    const url=await _fb.uploadImage('hero/banner', db.heroImage);
+    if(url){ db.heroImage=url; _markDirty('hero',{heroImage:url}); migrated=true; }
+  }
+
+  // Product images
+  for(const prod of (db.products||[])){
+    const imgs=prod.imgs&&prod.imgs.length?prod.imgs:(prod.img?[prod.img]:[]);
+    const needsMigration=imgs.some(s=>_fb.isBase64(s));
+    if(!needsMigration) continue;
+    console.log('[migrate] uploading images for product',prod.id);
+    const newImgs=await Promise.all(imgs.map(async(src,i)=>{
+      if(!_fb.isBase64(src)) return src;
+      const url=await _fb.uploadImage('products/'+prod.id+'_'+i, src);
+      return url||src;
+    }));
+    prod.imgs=newImgs; prod.img=newImgs[0]||'';
+    _markDirty('img_'+prod.id,{imgs:newImgs});
+    migrated=true;
+  }
+
+  // Referrer QR codes
+  for(const ref of (db.referrers||[])){
+    let refMigrated=false;
+    if(_fb.isBase64(ref.alipayQr)){
+      const url=await _fb.uploadImage('referrers/'+ref.id+'_alipay', ref.alipayQr);
+      if(url){ ref.alipayQr=url; refMigrated=true; }
+    }
+    if(_fb.isBase64(ref.wechatQr)){
+      const url=await _fb.uploadImage('referrers/'+ref.id+'_wechat', ref.wechatQr);
+      if(url){ ref.wechatQr=url; refMigrated=true; }
+    }
+    if(refMigrated){ _markDirty('ref_'+ref.id,{alipayQr:ref.alipayQr||'',wechatQr:ref.wechatQr||''}); migrated=true; }
+  }
+
+  if(migrated){
+    console.log('[migrate] flushing migrated URLs to DB...');
+    await _flushDirty();
+    try{localStorage.setItem(IMG_DOC_KEY,JSON.stringify(_buildLocalImgCache()));}catch(e){}
+    console.log('[migrate] done — base64 images replaced with Storage URLs. DB egress will drop significantly.');
+  }
 }
 
 // Wait for Supabase adapter to be ready, then boot
@@ -1603,7 +1699,15 @@ function saveHeroText(){
 function handleHeroImgInline(e){
   const f=e.target.files[0];if(!f)return;
   const rd=new FileReader();
-  rd.onload=ev=>{db.heroImage=ev.target.result;sv(true);rShop(document.getElementById('root'));setTimeout(()=>{const p=document.getElementById('hero-edit-panel');if(p)p.style.display='flex';},50);};
+  rd.onload=async ev=>{
+    let src=ev.target.result;
+    if(_fb.uploadImage){
+      const url=await _fb.uploadImage('hero/banner', src);
+      if(url) src=url;
+    }
+    db.heroImage=src;sv(true);rShop(document.getElementById('root'));
+    setTimeout(()=>{const p=document.getElementById('hero-edit-panel');if(p)p.style.display='flex';},50);
+  };
   rd.readAsDataURL(f);
 }
 function removeHeroImgInline(){db.heroImage='';sv(true);rShop(document.getElementById('root'));setTimeout(()=>{const p=document.getElementById('hero-edit-panel');if(p)p.style.display='flex';},50);}
@@ -2099,21 +2203,30 @@ function collectVarFields(pfx){
 function handleProdImgs(e,pfx){
   const files=Array.from(e.target.files);if(!files.length)return;
   if(!window[pfx+'imgs'])window[pfx+'imgs']=[];
+  const prodIdMatch=pfx.match(/ep(p\d+)-/);
+  const prodId=prodIdMatch?prodIdMatch[1]:'new_'+Date.now();
   let loaded=0;
-  files.forEach(f=>{
+  const gallery=document.getElementById(pfx+'img-gallery');
+  if(gallery)gallery.innerHTML=`<div style="font-size:12px;color:var(--color-text-secondary);padding:8px">${lang==='en'?'Uploading…':lang==='zht'?'上傳中…':'上传中…'}</div>`;
+  files.forEach((f,fi)=>{
     const rd=new FileReader();
-    rd.onload=ev=>{
-      window[pfx+'imgs'].push(ev.target.result);
+    rd.onload=async ev=>{
+      let src=ev.target.result;
+      if(_fb.uploadImage){
+        const idx=(window[pfx+'imgs']||[]).length+fi;
+        const url=await _fb.uploadImage('products/'+prodId+'_'+idx, src);
+        if(url) src=url;
+      }
+      window[pfx+'imgs'].push(src);
       loaded++;
       if(loaded===files.length){
-        // Update only the image gallery in-place to avoid closing the edit form
-        const gallery=document.getElementById(pfx+'img-gallery');
-        if(gallery){
-          const imgs=window[pfx+'imgs'];
-          gallery.innerHTML=imgs.map((src,i)=>`<div style="position:relative;display:inline-block">
-            <img src="${src}" style="width:72px;height:72px;object-fit:cover;border-radius:6px;border:.5px solid var(--color-border-secondary);cursor:pointer" onclick="openCropTool('${pfx}',${i})">
+        const imgs=window[pfx+'imgs'];
+        const galleryEl=document.getElementById(pfx+'img-gallery');
+        if(galleryEl){
+          galleryEl.innerHTML=imgs.map((s,i)=>`<div style="position:relative;display:inline-block">
+            <img src="${s}" style="width:72px;height:72px;object-fit:cover;border-radius:6px;border:.5px solid var(--color-border-secondary);cursor:pointer" onclick="openCropTool('${pfx}',${i})">
             <button onclick="removeProdImg('${pfx}',${i})" style="position:absolute;top:-5px;right:-5px;background:#E24B4A;color:#fff;border:none;border-radius:50%;width:18px;height:18px;font-size:11px;cursor:pointer;display:flex;align-items:center;justify-content:center;padding:0;line-height:1">×</button>
-            <div style="font-size:10px;text-align:center;color:var(--color-text-secondary);margin-top:3px">${lang==='en'?'Edit':'编辑'}</div>
+            <div style="font-size:10px;text-align:center;color:var(--color-text-secondary);margin-top:3px">${lang==='en'?'Edit':'編輯'}</div>
           </div>`).join('');
         } else {
           rAdmProds(document.getElementById('atc'));
@@ -2131,7 +2244,24 @@ function toggleProd(id){const p=db.products.find(x=>x.id===id);if(!p)return;p.ac
 function deleteProd(id){db.products=db.products.filter(x=>x.id!==id);sv(true);rAdmProds(document.getElementById('atc'));}
 
 function qrUploadHtml(pfx,type,existing){const label=t(type==='alipay'?'alipayQr':'wechatQr');const icon=type==='alipay'?`<svg width="18" height="18" viewBox="0 0 24 24" fill="none"><rect width="24" height="24" rx="4" fill="#1677FF"/><path d="M4 7h16M4 12h8m-8 5h5" stroke="white" stroke-width="1.8" stroke-linecap="round"/><path d="M14 14s3 1.5 5 2.5" stroke="white" stroke-width="1.5" stroke-linecap="round"/></svg>`:`<svg width="18" height="18" viewBox="0 0 24 24" fill="none"><rect width="24" height="24" rx="4" fill="#07C160"/><path d="M8 10c3-4 10-3 10 1 0 2.5-2.5 4-5 3l-3 2 1-2.5C9.5 12.5 8 11.5 8 10z" fill="white"/></svg>`;const imgHtml=existing?`<img src="${existing}" class="qr-preview" style="margin:0 auto 6px;display:block"><div style="font-size:11px;color:var(--color-text-secondary);margin-bottom:6px">${t('replaceQr')}</div>`:`<div style="margin-bottom:6px">${icon}</div><div style="font-size:12px;color:var(--color-text-secondary)">${t('uploadQr')} ${label}</div>`;return `<div><div style="font-size:12px;color:var(--color-text-secondary);margin-bottom:5px;font-weight:500;display:flex;align-items:center;gap:5px">${icon} ${label}</div><label class="qr-upload-box" style="display:block;cursor:pointer">${imgHtml}<input type="file" accept="image/*" style="display:none" onchange="handleQr(event,'${pfx}','${type}')"></label>${existing?`<button class="btn sm d" style="margin-top:4px;width:100%;justify-content:center" onclick="clearQr('${pfx}','${type}')">${t('removeQr')}</button>`:''}</div>`;}
-function handleQr(e,pfx,type){const f=e.target.files[0];if(!f)return;const rd=new FileReader();rd.onload=ev=>{window[pfx+type+'Qr']=ev.target.result;const tc=document.getElementById('atc');if(atab==='addref')rAdmAddRef(tc);else rAdmRefs(tc);};rd.readAsDataURL(f);}
+function handleQr(e,pfx,type){
+  const f=e.target.files[0];if(!f)return;
+  const rd=new FileReader();
+  rd.onload=async ev=>{
+    let src=ev.target.result;
+    // Upload QR image to Storage — only store URL in DB
+    if(_fb.uploadImage){
+      const refIdMatch=pfx.match(/nr-|ep(r[^-]+)-/);
+      const refSlug=pfx.replace(/[^a-z0-9]/gi,'');
+      const url=await _fb.uploadImage('referrers/'+refSlug+'_'+type, src);
+      if(url) src=url;
+    }
+    window[pfx+type+'Qr']=src;
+    const tc=document.getElementById('atc');
+    if(atab==='addref')rAdmAddRef(tc);else rAdmRefs(tc);
+  };
+  rd.readAsDataURL(f);
+}
 function clearQr(pfx,type){window[pfx+type+'Qr']='';const tc=document.getElementById('atc');if(atab==='addref')rAdmAddRef(tc);else rAdmRefs(tc);}
 function getQr(pfx,type,fb){const k=pfx+type+'Qr';return window[k]!==undefined?window[k]:(fb||'');}
 function refFormFields(ref,pfx){const v=f=>ref?ref[f]||'':'';const aqr=getQr(pfx,'alipay',ref?.alipayQr);const wqr=getQr(pfx,'wechat',ref?.wechatQr);return `<div class="sect">${lang==='en'?'Basic Info':(lang==='zht'?'基本資訊':'基本信息')}</div><div class="g2" style="margin-bottom:10px"><div class="fl"><label>${t('referrerName')}</label><input type="text" id="${pfx}name" value="${v('name')}"></div><div class="fl"><label>${t('iMemberNo')}</label><input type="text" id="${pfx}iMemberNo" value="${v('iMemberNo')}"></div></div><div class="fl"><label>${t('address')}</label><input type="text" id="${pfx}address" value="${v('address')}"></div><div class="g2" style="margin-bottom:10px"><div class="fl"><label>${t('country')}</label><input type="text" id="${pfx}country" value="${v('country')}"></div><div class="fl"><label>${t('phone')}</label><input type="text" id="${pfx}phone" value="${v('phone')}"></div></div><div class="fl"><label>${t('email')}</label><input type="email" id="${pfx}email" value="${v('email')}"></div><div class="sect">${lang==='en'?'Referral Settings':(lang==='zht'?'推薦設定':'推荐设置')}</div><div class="g2" style="margin-bottom:10px"><div class="fl"><label>${t('referralCodeLabel')}</label><div style="display:flex;gap:6px"><input type="text" id="${pfx}code" value="${v('code')}" style="text-transform:uppercase;font-family:var(--font-mono);flex:1"><button class="btn sm" onclick="gCode('${pfx}code')">${t('random')}</button></div></div><div class="fl"><label>${t('status')}</label><select id="${pfx}active"><option value="1" ${(!ref||ref.active)?'selected':''}>${t('active2')}</option><option value="0" ${(ref&&!ref.active)?'selected':''}>${t('inactive2')}</option></select></div></div><div class="fl"><label>${t('note')}</label><input type="text" id="${pfx}note" value="${v('note')}"></div><div class="sect">${lang==='en'?'Payment QR Codes':(lang==='zht'?'收款二維碼':'收款二维码')}</div><div class="m i" style="font-size:12px;margin-bottom:10px">${t('qrNote')}</div><div class="g2">${qrUploadHtml(pfx,'alipay',aqr)}${qrUploadHtml(pfx,'wechat',wqr)}</div>`;}
@@ -2172,7 +2302,25 @@ function rAdmSettings(tc){const heroImg=db.heroImage||'';const heroTitle=db.hero
   <div id="hero-img-msg" style="margin-top:8px"></div>
 </div>
 <div style="background:var(--color-background-primary);border:.5px solid var(--color-border-tertiary);border-radius:var(--border-radius-lg);padding:1.5rem;margin-bottom:1rem"><div style="font-size:15px;font-weight:500;margin-bottom:1rem">${t('adminCredentials')}</div><div id="stg-msg"></div><div class="fl"><label>${t('newEmail')}</label><input type="email" id="stg-email" value="${db.adminEmail||''}" placeholder="${t('adminEmailPlaceholder')}"></div><div class="dv"></div><div class="fl"><label>${t('currentPassword')}</label><input type="password" id="stg-cur-pw" placeholder="••••••••"></div><div class="fl"><label>${t('newPassword')} <span style="font-size:11px;color:var(--color-text-tertiary)">(${lang==='en'?'leave blank to keep current':lang==='zht'?'留空保持不變':'留空保持不变'})</span></label><input type="password" id="stg-new-pw" placeholder="••••••••" oninput="ckAS2(this.value)"><div class="sb" id="stg-sb" style="width:0%;background:#E24B4A"></div></div><div class="fl"><label>${t('confirmPassword')}</label><input type="password" id="stg-new-pw2" placeholder="••••••••"></div><button class="btn p" style="margin-top:8px" onclick="saveAdminSettings()">${t('saveCredentials')}</button></div></div>`;}
-function handleHeroImg(e){const f=e.target.files[0];if(!f)return;const rd=new FileReader();rd.onload=ev=>{db.heroImage=ev.target.result;sv(true);const msg=document.getElementById('hero-img-msg');if(msg)msg.innerHTML=`<div class="m s">${lang==='en'?'Banner image saved!':lang==='zht'?'橫幅圖片已儲存！':'横幅图片已保存！'}</div>`;rAdmSettings(document.getElementById('atc'));};rd.readAsDataURL(f);}
+function handleHeroImg(e){
+  const f=e.target.files[0];if(!f)return;
+  const msg=document.getElementById('hero-img-msg');
+  if(msg)msg.innerHTML=`<div class="m" style="color:var(--color-text-secondary)">${lang==='en'?'Uploading…':lang==='zht'?'上傳中…':'上传中…'}</div>`;
+  const rd=new FileReader();
+  rd.onload=async ev=>{
+    // Upload to Supabase Storage (not the database) — only a URL is stored in DB
+    if(_fb.uploadImage){
+      const url=await _fb.uploadImage('hero/banner', ev.target.result);
+      db.heroImage = url || ev.target.result; // fallback to base64 if upload fails
+    } else {
+      db.heroImage=ev.target.result;
+    }
+    sv(true);
+    if(msg)msg.innerHTML=`<div class="m s">${lang==='en'?'Banner image saved!':lang==='zht'?'橫幅圖片已儲存！':'横幅图片已保存！'}</div>`;
+    rAdmSettings(document.getElementById('atc'));
+  };
+  rd.readAsDataURL(f);
+}
 function removeHeroImg(){db.heroImage='';sv(true);rAdmSettings(document.getElementById('atc'));}
 function saveHeroTextSettings(){const title=document.getElementById('stg-hero-title')?.value.trim(),sub=document.getElementById('stg-hero-sub')?.value.trim(),msg=document.getElementById('hero-text-msg');if(title!==undefined)db.heroTextTitle=title;if(sub!==undefined)db.heroTextSub=sub;sv(true);if(msg)msg.innerHTML='<div class="m s" style="font-size:12px">'+(lang==='en'?'Text saved!':lang==='zht'?'文字已儲存！':'文字已保存！')+'</div>';setTimeout(()=>{if(msg)msg.innerHTML='';},2000);}function ckAS2(pw){const b=document.getElementById('stg-sb');if(!b)return;if(!pw){b.style.width='0%';return;}let s=0;if(pw.length>=8)s++;if(/[A-Z]/.test(pw))s++;if(/[0-9]/.test(pw))s++;if(/[^A-Za-z0-9]/.test(pw))s++;b.style.width=['0%','25%','50%','75%','100%'][s];b.style.background=['#E24B4A','#E24B4A','#EF9F27','#7a9c5a','#314021'][s];}
 function saveAdminSettings(){const em=document.getElementById('stg-email').value.trim().toLowerCase(),cur=document.getElementById('stg-cur-pw').value,npw=document.getElementById('stg-new-pw').value,npw2=document.getElementById('stg-new-pw2').value,msg=document.getElementById('stg-msg');if(cur!==db.adminPassword){msg.innerHTML=`<div class="m e">${t('errorCurrentPassword')}</div>`;return;}if(!em){msg.innerHTML=`<div class="m e">${t('errorEmailRequired')}</div>`;return;}if(npw&&npw.length<8){msg.innerHTML=`<div class="m e">${t('errorPassShort')}</div>`;return;}if(npw&&npw!==npw2){msg.innerHTML=`<div class="m e">${t('errorPassMismatch')}</div>`;return;}db.adminEmail=em;if(npw)db.adminPassword=npw;sv(true);msg.innerHTML=`<div class="m s">${t('credentialsSaved')}</div>`;document.getElementById('stg-cur-pw').value='';document.getElementById('stg-new-pw').value='';document.getElementById('stg-new-pw2').value='';if(document.getElementById('stg-sb'))document.getElementById('stg-sb').style.width='0%';}
